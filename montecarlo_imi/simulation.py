@@ -16,6 +16,8 @@ class MaterialPolicy:
     lt_min: float  # lead time min (mois)
     lt_mode: float  # lead time mode (mois)
     lt_max: float  # lead time max (mois)
+    cost_per_ton: float = 0.0  # MAD/t (ou autre devise) - utilisé pour arbitrer Local vs Import
+    source: str = "local"  # "local" | "import" (sert à activer les retards exceptionnels)
     stock_max_months: float = 0.0  # (non utilisé dans la dynamique) conservé pour compat si besoin
 
 
@@ -137,8 +139,8 @@ def simulate_one_path_with_history(
                 if q > 0:
                     lt = sample_triangular_int(rng, m.lt_min, m.lt_mode, m.lt_max)
 
-                    # Retards exceptionnels: désactivés pour les matières internes (MAP)
-                    if m.name not in internal_materials:
+                    # Retards exceptionnels: appliqués uniquement aux matières externes importées
+                    if (m.name not in internal_materials) and (str(m.source).lower().startswith("imp")):
                         lt += sample_delay(rng, cfg)
 
                     arrival_t = t + lt
@@ -158,6 +160,153 @@ def simulate_one_path_with_history(
             stock_min[m.name] = min(stock_min[m.name], stock[m.name])
 
     return stock_min, stock_hist
+
+
+def simulate_one_path_costs(
+    rng: np.random.Generator,
+    cfg: SimulationConfig,
+    materials: List[MaterialPolicy],
+    plan_prod: np.ndarray,
+    initial_stocks: Dict[str, float],
+    target_levels: Dict[str, float],
+    internal_materials: set,
+    profit_per_ton_abc: float,
+) -> Tuple[Dict[str, float], float, float, bool]:
+    """
+    Simule 1 trajectoire et calcule un bilan économique simple :
+      - coût d'achat = somme(q commandée * coût/tonne)
+      - coût de rupture = profit perdu si au moins une matière est en rupture (stock < 0) sur un mois
+
+    Hypothèse :
+      - Si, sur un mois t, au moins une matière a un stock < 0 après consommation,
+        alors la production ABC du mois est considérée perdue (profit = 0 sur ce mois).
+    """
+    T = cfg.horizon_months
+    receipts = {m.name: np.zeros(T, dtype=float) for m in materials}
+    stock = {m.name: float(initial_stocks[m.name]) for m in materials}
+    stock_min = {m.name: stock[m.name] for m in materials}
+
+    purchase_cost = 0.0
+    rupture_cost = 0.0
+    any_stockout = False
+
+    for t in range(T):
+        # 1) Réceptions (début de mois)
+        for m in materials:
+            stock[m.name] += receipts[m.name][t]
+
+        # 2) Commandes (R,S) si mois de revue (début de mois, après réceptions)
+        for m in materials:
+            if (t % m.review_period) == 0:
+                pipeline = receipts[m.name][(t + 1) :].sum()
+                inv_position = stock[m.name] + pipeline
+                q = max(0.0, target_levels[m.name] - inv_position)
+
+                if q > 0:
+                    purchase_cost += float(q) * float(m.cost_per_ton)
+
+                    lt = sample_triangular_int(rng, m.lt_min, m.lt_mode, m.lt_max)
+                    # Retards exceptionnels : appliqués uniquement aux matières externes importées
+                    if (m.name not in internal_materials) and (str(m.source).lower().startswith("imp")):
+                        lt += sample_delay(rng, cfg)
+
+                    arrival_t = t + lt
+                    if arrival_t < T:
+                        if arrival_t == t:
+                            stock[m.name] += q
+                        else:
+                            receipts[m.name][arrival_t] += q
+
+        # 3) Production aléatoire autour du plan + consommation (sur le mois)
+        eps = rng.normal(0.0, cfg.sigma_prod)
+        prod_t = max(0.0, float(plan_prod[t]) * (1.0 + float(eps)))
+
+        month_stockout = False
+        for m in materials:
+            stock[m.name] -= m.x * prod_t
+            stock_min[m.name] = min(stock_min[m.name], stock[m.name])
+            if stock[m.name] < 0:
+                month_stockout = True
+
+        if month_stockout:
+            any_stockout = True
+            rupture_cost += float(profit_per_ton_abc) * float(prod_t)
+
+    return stock_min, purchase_cost, rupture_cost, any_stockout
+
+
+@dataclass
+class CostMonteCarloResults:
+    total_cost: np.ndarray
+    purchase_cost: np.ndarray
+    rupture_cost: np.ndarray
+    p_any_stockout: float
+    p_any_stockout_by_material: Dict[str, float]
+
+
+def run_monte_carlo_costs(
+    cfg: SimulationConfig,
+    materials: List[MaterialPolicy],
+    seasonality: Seasonality,
+    internal_materials: set,
+    profit_per_ton_abc: float,
+) -> CostMonteCarloResults:
+    """
+    Lance N scénarios Monte Carlo et renvoie les coûts (achat + rupture) pour arbitrer Local vs Import.
+    """
+    rng = np.random.default_rng(cfg.seed)
+
+    years = int(math.ceil(cfg.horizon_months / 12))
+    total_cost = np.zeros(cfg.n_iter, dtype=float)
+    purchase_cost = np.zeros(cfg.n_iter, dtype=float)
+    rupture_cost = np.zeros(cfg.n_iter, dtype=float)
+    any_stockout = np.zeros(cfg.n_iter, dtype=bool)
+
+    stock_mins = {m.name: np.zeros(cfg.n_iter, dtype=float) for m in materials}
+
+    for k in range(cfg.n_iter):
+        annuals = rng.uniform(cfg.annual_min, cfg.annual_max, size=years).astype(float)
+        plan_prod = build_plan_for_horizon(annuals, cfg.horizon_months, seasonality)
+
+        avg_prod = float(plan_prod.mean())
+        avg_cons = {m.name: float(m.x * avg_prod) for m in materials}
+
+        target_levels: Dict[str, float] = {}
+        initial_stocks: Dict[str, float] = {}
+        for m in materials:
+            target_levels[m.name] = float(
+                (m.lt_mode + m.review_period + m.ss_months) * avg_cons[m.name]
+            )
+            initial_stocks[m.name] = float((m.lt_mode + m.ss_months) * avg_cons[m.name])
+
+        stock_min_k, pc, rc, any_so = simulate_one_path_costs(
+            rng=rng,
+            cfg=cfg,
+            materials=materials,
+            plan_prod=plan_prod,
+            initial_stocks=initial_stocks,
+            target_levels=target_levels,
+            internal_materials=internal_materials,
+            profit_per_ton_abc=profit_per_ton_abc,
+        )
+
+        purchase_cost[k] = float(pc)
+        rupture_cost[k] = float(rc)
+        total_cost[k] = float(pc) + float(rc)
+        any_stockout[k] = bool(any_so)
+        for m in materials:
+            stock_mins[m.name][k] = float(stock_min_k[m.name])
+
+    p_any_stockout = float(np.mean(any_stockout))
+    p_by_material = {m.name: float(np.mean(stock_mins[m.name] < 0)) for m in materials}
+
+    return CostMonteCarloResults(
+        total_cost=total_cost,
+        purchase_cost=purchase_cost,
+        rupture_cost=rupture_cost,
+        p_any_stockout=p_any_stockout,
+        p_any_stockout_by_material=p_by_material,
+    )
 
 
 @dataclass

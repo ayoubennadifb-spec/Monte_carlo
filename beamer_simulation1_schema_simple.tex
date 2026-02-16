@@ -1,0 +1,89 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{Madrid}
+\usecolortheme{default}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric}
+\usepackage{adjustbox}
+
+\title{Schémas simplifiés — Simulations Monte Carlo}
+\author{}
+\date{}
+
+\tikzset{
+  arrow/.style={-Latex, very thick},
+  box/.style={rectangle, rounded corners, draw, align=center, inner sep=12pt},
+  in/.style={box, fill=blue!6, text width=0.28\textwidth},
+  mid/.style={box, fill=orange!12, text width=0.34\textwidth},
+  out/.style={box, fill=green!10, text width=0.28\textwidth}
+}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}[plain]{Simulation 1 — Risque de rupture de stock (très simple)}
+\vspace{-2mm}
+\centering
+\begin{adjustbox}{max totalsize={\textwidth}{0.62\textheight},center}
+\begin{tikzpicture}[font=\Large, node distance=16mm]
+
+\node[in] (inp) {\textbf{Entrées}\par\medskip
+Stocks\par
+Délais\par
+Règles de commande\par
+Plan de production};
+
+\node[mid, right=of inp, xshift=8mm] (sys) {\textbf{Simulation}\par\medskip
+On rejoue \textbf{N fois} la réalité\par
+(mois par mois)\par
+avec des aléas};
+
+\node[out, right=of sys, xshift=8mm] (out) {\textbf{Résultat}\par\medskip
+Pour chaque matière :\par
+\textbf{risque de rupture}\par
+(\% de cas)};
+
+\draw[arrow] (inp) -- (sys);
+\draw[arrow] (sys) -- (out);
+
+\end{tikzpicture}
+\end{adjustbox}
+\end{frame}
+
+\begin{frame}[plain]{Simulation 2 — Délai pour atteindre 11\,000--15\,000 t/an (très simple)}
+\vspace{-2mm}
+\centering
+\begin{adjustbox}{max totalsize={\textwidth}{0.62\textheight},center}
+\begin{tikzpicture}[font=\Large, node distance=16mm]
+
+\node[in] (inp) {\textbf{Entrées}\par\medskip
+Marché\par
+Capacité\par
+Clients / demande\par
+Cible 11--15 kt/an};
+
+\node[mid, right=of inp, xshift=8mm] (sys) {\textbf{Simulation}\par\medskip
+On rejoue \textbf{N fois}\par
+le ramp-up (mois par mois)\par
+avec des aléas};
+
+\node[out, right=of sys, xshift=8mm] (out) {\textbf{Résultat}\par\medskip
+Quand on atteint\par
+11 kt/an et 15 kt/an\par
+(délai probable)};
+
+\draw[arrow] (inp) -- (sys);
+\draw[arrow] (sys) -- (out);
+
+\end{tikzpicture}
+\end{adjustbox}
+\end{frame}
+
+\end{document}

@@ -5,6 +5,7 @@ import io
 import json
 import time
 from dataclasses import asdict
+from itertools import product
 
 import numpy as np
 import pandas as pd
@@ -30,6 +31,7 @@ from montecarlo_imi.simulation import (
     SimulationConfig,
     build_plan_for_horizon,
     run_monte_carlo,
+    run_monte_carlo_costs,
     summarize_results,
 )
 
@@ -43,6 +45,8 @@ def _reset_supply_defaults() -> None:
     st.session_state["supply_materials_df"] = DEFAULT_MATERIALS_DF.copy()
     st.session_state["supply_results"] = None
     st.session_state["supply_kpi_df"] = None
+    st.session_state["supply_profit_per_ton_abc"] = 0.0
+    st.session_state["supply_sourcing_grid_df"] = None
 
 
 def _reset_ramp_defaults() -> None:
@@ -68,13 +72,18 @@ def _ensure_state() -> None:
 def _validate_materials_df(df: pd.DataFrame) -> tuple[list[str], list[str], pd.DataFrame]:
     required_cols = [
         "name",
-        "is_internal",
+        "source",
         "x",
         "review_period",
         "ss_months",
-        "lt_min",
-        "lt_mode",
-        "lt_max",
+        "lt_min_local",
+        "lt_mode_local",
+        "lt_max_local",
+        "lt_min_import",
+        "lt_mode_import",
+        "lt_max_import",
+        "cost_local",
+        "cost_import",
     ]
 
     errors: list[str] = []
@@ -88,11 +97,19 @@ def _validate_materials_df(df: pd.DataFrame) -> tuple[list[str], list[str], pd.D
 
     df_work = df.reset_index(drop=True).copy()
     df_work["name"] = df_work["name"].astype(str).str.strip()
+    df_work["source"] = df_work["source"].astype(str).str.strip().str.lower()
+    df_work.loc[df_work["source"].str.startswith("imp"), "source"] = "import"
+    df_work.loc[~df_work["source"].isin(["local", "import"]), "source"] = ""
 
     empty_names = df_work["name"].eq("") | df_work["name"].str.lower().eq("nan")
     if empty_names.any():
         bad_rows = (np.where(empty_names)[0] + 1).tolist()
         errors.append(f"Nom matière vide (lignes): {bad_rows}")
+
+    bad_map = df_work["name"].str.upper().eq("MAP")
+    if bad_map.any():
+        bad_rows = (np.where(bad_map)[0] + 1).tolist()
+        errors.append(f"MAP est hors simulation (OCP producteur) — supprime la ligne (lignes): {bad_rows}")
 
     dupes = df_work["name"][df_work["name"].duplicated()].unique().tolist()
     if dupes:
@@ -101,7 +118,19 @@ def _validate_materials_df(df: pd.DataFrame) -> tuple[list[str], list[str], pd.D
     def _num_col(col: str) -> pd.Series:
         return pd.to_numeric(df_work[col], errors="coerce")
 
-    numeric_cols = ["x", "review_period", "ss_months", "lt_min", "lt_mode", "lt_max"]
+    numeric_cols = [
+        "x",
+        "review_period",
+        "ss_months",
+        "lt_min_local",
+        "lt_mode_local",
+        "lt_max_local",
+        "lt_min_import",
+        "lt_mode_import",
+        "lt_max_import",
+        "cost_local",
+        "cost_import",
+    ]
     for col in numeric_cols:
         s = _num_col(col)
         if s.isna().any():
@@ -134,16 +163,39 @@ def _validate_materials_df(df: pd.DataFrame) -> tuple[list[str], list[str], pd.D
         bad_rows = (np.where(neg_ss)[0] + 1).tolist()
         errors.append(f"'ss_months' doit être >= 0 (lignes): {bad_rows}")
 
-    for col in ["lt_min", "lt_mode", "lt_max"]:
+    for col in [
+        "lt_min_local",
+        "lt_mode_local",
+        "lt_max_local",
+        "lt_min_import",
+        "lt_mode_import",
+        "lt_max_import",
+        "cost_local",
+        "cost_import",
+    ]:
         neg = df_work[col] < 0
         if neg.any():
             bad_rows = (np.where(neg)[0] + 1).tolist()
             errors.append(f"'{col}' doit être >= 0 (lignes): {bad_rows}")
 
-    bad_lt = (df_work["lt_min"] > df_work["lt_mode"]) | (df_work["lt_mode"] > df_work["lt_max"])
-    if bad_lt.any():
-        bad_rows = (np.where(bad_lt)[0] + 1).tolist()
-        errors.append(f"Contraintes LT violées (lt_min ≤ lt_mode ≤ lt_max) (lignes): {bad_rows}")
+    bad_src = ~df_work["source"].isin(["local", "import"])
+    if bad_src.any():
+        bad_rows = (np.where(bad_src)[0] + 1).tolist()
+        errors.append(f"'source' doit être 'local' ou 'import' (lignes): {bad_rows}")
+
+    bad_lt_local = (df_work["lt_min_local"] > df_work["lt_mode_local"]) | (
+        df_work["lt_mode_local"] > df_work["lt_max_local"]
+    )
+    if bad_lt_local.any():
+        bad_rows = (np.where(bad_lt_local)[0] + 1).tolist()
+        errors.append(f"Contraintes LT local violées (min ≤ mode ≤ max) (lignes): {bad_rows}")
+
+    bad_lt_import = (df_work["lt_min_import"] > df_work["lt_mode_import"]) | (
+        df_work["lt_mode_import"] > df_work["lt_max_import"]
+    )
+    if bad_lt_import.any():
+        bad_rows = (np.where(bad_lt_import)[0] + 1).tolist()
+        errors.append(f"Contraintes LT import violées (min ≤ mode ≤ max) (lignes): {bad_rows}")
 
     df_work["review_period"] = df_work["review_period"].round().astype(int)
     return errors, warnings, df_work
@@ -155,21 +207,84 @@ def _materials_df_to_policies(df: pd.DataFrame) -> tuple[list[MaterialPolicy], s
 
     for _, row in df.iterrows():
         name = str(row["name"]).strip()
-        if bool(row.get("is_internal", False)):
-            internal.add(name)
+        source = str(row.get("source", "local")).strip().lower()
+        is_import = source.startswith("imp")
+
+        lt_min = float(row["lt_min_import"] if is_import else row["lt_min_local"])
+        lt_mode = float(row["lt_mode_import"] if is_import else row["lt_mode_local"])
+        lt_max = float(row["lt_max_import"] if is_import else row["lt_max_local"])
+        cost = float(row["cost_import"] if is_import else row["cost_local"])
         materials.append(
             MaterialPolicy(
                 name=name,
                 x=float(row["x"]),
                 review_period=int(row["review_period"]),
                 ss_months=float(row["ss_months"]),
-                lt_min=float(row["lt_min"]),
-                lt_mode=float(row["lt_mode"]),
-                lt_max=float(row["lt_max"]),
+                lt_min=lt_min,
+                lt_mode=lt_mode,
+                lt_max=lt_max,
+                cost_per_ton=cost,
+                source="import" if is_import else "local",
             )
         )
 
     return materials, internal
+
+
+@st.cache_data(show_spinner=False)
+def _compute_sourcing_grid(
+    cfg_dict: dict,
+    seasonality_dict: dict,
+    materials_records: list[dict],
+    profit_per_ton_abc: float,
+    n_iter_eval: int,
+) -> pd.DataFrame:
+    """
+    Calcule les 2^M configurations (Local/Import) et renvoie un tableau de comparaison.
+    """
+    cfg = SimulationConfig(**cfg_dict)
+    cfg.n_iter = int(n_iter_eval)
+    seasonality = Seasonality(**seasonality_dict)
+    base_df = pd.DataFrame(materials_records).reset_index(drop=True)
+
+    names = base_df["name"].astype(str).str.strip().tolist()
+    if not names:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for combo in product(["local", "import"], repeat=len(names)):
+        df_combo = base_df.copy()
+        df_combo["source"] = list(combo)
+
+        materials, internal = _materials_df_to_policies(df_combo)
+        res = run_monte_carlo_costs(
+            cfg=cfg,
+            materials=materials,
+            seasonality=seasonality,
+            internal_materials=internal,
+            profit_per_ton_abc=float(profit_per_ton_abc),
+        )
+
+        tc = res.total_cost
+        pc = res.purchase_cost
+        rc = res.rupture_cost
+
+        config_txt = " | ".join([f"{n}={('Import' if s=='import' else 'Local')}" for n, s in zip(names, combo)])
+        rows.append(
+            {
+                "configuration": config_txt,
+                "mean_total": float(np.mean(tc)),
+                "p05_total": float(np.percentile(tc, 5)),
+                "p50_total": float(np.percentile(tc, 50)),
+                "p95_total": float(np.percentile(tc, 95)),
+                "mean_purchase": float(np.mean(pc)),
+                "mean_rupture": float(np.mean(rc)),
+                "p_any_stockout_any_mat": float(res.p_any_stockout),
+            }
+        )
+
+    out = pd.DataFrame(rows).sort_values("mean_total").reset_index(drop=True)
+    return out
 
 
 def _seasonality_inputs(key_prefix: str, seasonality_state: dict) -> Seasonality:
@@ -387,7 +502,8 @@ def _render_supply_chain() -> None:
         st.plotly_chart(fig_plan, use_container_width=True)
         st.caption(f"Preview basé sur une production annuelle constante = {preview_annual:.0f} t/an.")
 
-        st.markdown("### Matières & politiques")
+        st.markdown("### Matières (MAP hors simulation)")
+        st.caption("MAP est supposée disponible (OCP producteur) et n’est pas simulée ici.")
         edited_df = st.data_editor(
             st.session_state["supply_materials_df"],
             num_rows="dynamic",
@@ -395,13 +511,30 @@ def _render_supply_chain() -> None:
             key="supply_materials_editor",
             column_config={
                 "name": st.column_config.TextColumn("Nom", required=True),
-                "is_internal": st.column_config.CheckboxColumn("Interne (OCP)", default=False),
+                "source": st.column_config.SelectboxColumn("Source", options=["local", "import"], required=True),
                 "x": st.column_config.NumberColumn("x (fraction)", min_value=0.0, max_value=1.0, step=0.001),
                 "review_period": st.column_config.NumberColumn("R (mois)", min_value=1, step=1),
                 "ss_months": st.column_config.NumberColumn("SS (mois)", min_value=0.0, step=0.1),
-                "lt_min": st.column_config.NumberColumn("LT min (mois)", min_value=0.0, step=0.001, format="%.3f"),
-                "lt_mode": st.column_config.NumberColumn("LT mode (mois)", min_value=0.0, step=0.001, format="%.3f"),
-                "lt_max": st.column_config.NumberColumn("LT max (mois)", min_value=0.0, step=0.001, format="%.3f"),
+                "lt_min_local": st.column_config.NumberColumn(
+                    "LT local min (mois)", min_value=0.0, step=0.001, format="%.3f"
+                ),
+                "lt_mode_local": st.column_config.NumberColumn(
+                    "LT local mode (mois)", min_value=0.0, step=0.001, format="%.3f"
+                ),
+                "lt_max_local": st.column_config.NumberColumn(
+                    "LT local max (mois)", min_value=0.0, step=0.001, format="%.3f"
+                ),
+                "lt_min_import": st.column_config.NumberColumn(
+                    "LT import min (mois)", min_value=0.0, step=0.001, format="%.3f"
+                ),
+                "lt_mode_import": st.column_config.NumberColumn(
+                    "LT import mode (mois)", min_value=0.0, step=0.001, format="%.3f"
+                ),
+                "lt_max_import": st.column_config.NumberColumn(
+                    "LT import max (mois)", min_value=0.0, step=0.001, format="%.3f"
+                ),
+                "cost_local": st.column_config.NumberColumn("Coût local (MAD/t)", min_value=0.0, step=10.0),
+                "cost_import": st.column_config.NumberColumn("Coût import (MAD/t)", min_value=0.0, step=10.0),
             },
         )
         st.session_state["supply_materials_df"] = edited_df
@@ -432,6 +565,68 @@ def _render_supply_chain() -> None:
         est_bytes = int(n_iter) * int(horizon_months) * max(1, n_mat) * 8
         est_mb = est_bytes / (1024 * 1024)
         st.caption(f"Estimation mémoire stock_paths ≈ {est_mb:.1f} MB (hors overhead).")
+
+        st.markdown("### Décision Local vs Import (coût total)")
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            profit_per_ton_abc = st.number_input(
+                "Profit ABC (MAD par tonne) — utilisé comme coût de rupture",
+                min_value=0.0,
+                value=float(st.session_state.get("supply_profit_per_ton_abc", 0.0)),
+                step=10.0,
+                key="supply_profit_per_ton_abc_input",
+            )
+        with c2:
+            n_iter_eval = st.number_input(
+                "Itérations par configuration (16 configs)",
+                min_value=50,
+                max_value=50_000,
+                value=int(min(500, int(st.session_state["supply_cfg"]["n_iter"]))),
+                step=50,
+                key="supply_n_iter_eval",
+            )
+
+        st.session_state["supply_profit_per_ton_abc"] = float(profit_per_ton_abc)
+
+        eval_disabled = bool(mat_errors) or (profit_per_ton_abc <= 0)
+        if profit_per_ton_abc <= 0:
+            st.info("Renseigne un profit ABC > 0 pour évaluer le coût de rupture.")
+
+        if st.button("Évaluer les 16 configurations (Local/Import)", disabled=eval_disabled):
+            cfg_eval = {**st.session_state["supply_cfg"], "n_iter": int(n_iter_eval)}
+            grid_df = _compute_sourcing_grid(
+                cfg_dict=cfg_eval,
+                seasonality_dict=seasonality.as_dict(),
+                materials_records=validated_df.to_dict(orient="records"),
+                profit_per_ton_abc=float(profit_per_ton_abc),
+                n_iter_eval=int(n_iter_eval),
+            )
+            st.session_state["supply_sourcing_grid_df"] = grid_df
+
+        grid_df = st.session_state.get("supply_sourcing_grid_df")
+        if isinstance(grid_df, pd.DataFrame) and not grid_df.empty:
+            best = grid_df.iloc[0].to_dict()
+            st.success(
+                "Meilleure configuration (coût total moyen minimal) : "
+                f"`{best['configuration']}` | mean={best['mean_total']:.0f} MAD"
+            )
+            fig_cost = px.bar(
+                grid_df,
+                x="configuration",
+                y=["mean_purchase", "mean_rupture"],
+                barmode="stack",
+                hover_data=["p05_total", "p50_total", "p95_total", "p_any_stockout_any_mat"],
+            )
+            fig_cost.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=30, b=10),
+                xaxis_title="Configuration",
+                yaxis_title="Coût moyen (MAD) — achat + rupture",
+                legend_title_text="Composante",
+            )
+            fig_cost.update_xaxes(tickangle=35, automargin=True)
+            st.plotly_chart(fig_cost, use_container_width=True)
+            st.dataframe(grid_df, use_container_width=True, hide_index=True)
 
         if st.button("Run simulation", type="primary", disabled=not can_run, key="supply_run"):
             cfg = SimulationConfig(**st.session_state["supply_cfg"])

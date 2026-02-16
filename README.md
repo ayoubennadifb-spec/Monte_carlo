@@ -30,3 +30,10 @@ pytest
 - Modèle mensuel avec politique \((R,S)\) : réceptions \(\rightarrow\) revue/commande \(\rightarrow\) consommation (stock fin de mois).
 - Lead times en mois (fractionnaire autorisé). Convention : commande en début de mois, et si \(LT < 1\) mois alors la livraison arrive dans le même mois (décalage 0).
 - La production annuelle est tirée selon une loi **Uniforme** entre `annual_min` et `annual_max` (Option B: tirage par année).
+
+### Décision Local vs Import (Simulation 1)
+- MAP est considérée disponible (OCP producteur) et n’est pas simulée.
+- Pour chaque matière, on peut renseigner 2 profils (Local / Import) : coût (MAD/t) + délais (min/mode/max).
+- L’UI peut évaluer les **16 configurations** (Local/Import sur 4 matières) et comparer le **coût total** :
+  - coût d’achat des matières
+  - + coût de rupture (profit ABC perdu sur les mois où au moins une matière est en rupture)
