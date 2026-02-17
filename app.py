@@ -154,8 +154,12 @@ def _validate_materials_df(df: pd.DataFrame) -> tuple[list[str], list[str], pd.D
         bad_rows = (np.where(out)[0] + 1).tolist()
         errors.append(f"'x' doit être entre 0 et 1 (lignes): {bad_rows}")
     sum_x = float(x.sum()) if len(x) else 0.0
-    if len(x) and not np.isclose(sum_x, 1.0):
-        warnings.append(f"Somme des x = {sum_x:.6g} (≠ 1.0).")
+    if len(x) and (sum_x > 1.0 + 1e-9):
+        errors.append(f"Somme des x = {sum_x:.6g} (> 1.0).")
+    elif len(x) and not np.isclose(sum_x, 1.0):
+        warnings.append(
+            f"Somme des x = {sum_x:.6g} (≠ 1.0). OK si une fraction correspond à des matières non simulées (ex. MAP)."
+        )
 
     ss = df_work["ss_months"]
     neg_ss = ss < 0
@@ -256,6 +260,37 @@ def _compute_sourcing_grid(
         df_combo = base_df.copy()
         df_combo["source"] = list(combo)
 
+        # Validation: coûts requis pour le mode sélectionné
+        missing: list[str] = []
+        for n, s in zip(names, combo):
+            row = df_combo.loc[df_combo["name"].astype(str).str.strip() == n].iloc[0]
+            if s == "import":
+                c = float(row.get("cost_import", 0.0))
+                if not (c > 0):
+                    missing.append(f"{n}: cost_import")
+            else:
+                c = float(row.get("cost_local", 0.0))
+                if not (c > 0):
+                    missing.append(f"{n}: cost_local")
+
+        config_txt = " | ".join([f"{n}={('Import' if s=='import' else 'Local')}" for n, s in zip(names, combo)])
+        if missing:
+            rows.append(
+                {
+                    "configuration": config_txt,
+                    "is_valid": False,
+                    "missing_inputs": ", ".join(missing),
+                    "mean_total": np.nan,
+                    "p05_total": np.nan,
+                    "p50_total": np.nan,
+                    "p95_total": np.nan,
+                    "mean_purchase": np.nan,
+                    "mean_rupture": np.nan,
+                    "p_any_stockout_any_mat": np.nan,
+                }
+            )
+            continue
+
         materials, internal = _materials_df_to_policies(df_combo)
         res = run_monte_carlo_costs(
             cfg=cfg,
@@ -269,10 +304,11 @@ def _compute_sourcing_grid(
         pc = res.purchase_cost
         rc = res.rupture_cost
 
-        config_txt = " | ".join([f"{n}={('Import' if s=='import' else 'Local')}" for n, s in zip(names, combo)])
         rows.append(
             {
                 "configuration": config_txt,
+                "is_valid": True,
+                "missing_inputs": "",
                 "mean_total": float(np.mean(tc)),
                 "p05_total": float(np.percentile(tc, 5)),
                 "p50_total": float(np.percentile(tc, 50)),
@@ -283,20 +319,39 @@ def _compute_sourcing_grid(
             }
         )
 
-    out = pd.DataFrame(rows).sort_values("mean_total").reset_index(drop=True)
+    out = pd.DataFrame(rows)
+    if "is_valid" in out.columns:
+        out = out.sort_values(["is_valid", "mean_total"], ascending=[False, True]).reset_index(drop=True)
+    else:
+        out = out.sort_values("mean_total").reset_index(drop=True)
     return out
 
 
 def _render_sourcing_grid(grid_df: pd.DataFrame) -> None:
     if grid_df is None or grid_df.empty:
         return
-    best = grid_df.iloc[0].to_dict()
+    valid = grid_df[grid_df.get("is_valid", True) == True]
+    invalid = grid_df[grid_df.get("is_valid", True) == False]
+
+    if valid.empty:
+        st.error("Aucune configuration valide (coûts manquants). Renseigne les coûts local/import puis relance.")
+        if not invalid.empty:
+            st.dataframe(invalid, use_container_width=True, hide_index=True)
+        return
+
+    if not invalid.empty:
+        st.warning(
+            f"{len(invalid)}/{len(grid_df)} configurations ignorées (coûts manquants). "
+            "Complète les coûts pour comparer Local vs Import sur ces matières."
+        )
+
+    best = valid.iloc[0].to_dict()
     st.success(
         "Meilleure configuration (coût total moyen minimal) : "
         f"`{best['configuration']}` | mean={best['mean_total']:.0f} MAD"
     )
     fig_cost = px.bar(
-        grid_df,
+        valid,
         x="configuration",
         y=["mean_purchase", "mean_rupture"],
         barmode="stack",
@@ -311,7 +366,10 @@ def _render_sourcing_grid(grid_df: pd.DataFrame) -> None:
     )
     fig_cost.update_xaxes(tickangle=35, automargin=True)
     st.plotly_chart(fig_cost, use_container_width=True)
-    st.dataframe(grid_df, use_container_width=True, hide_index=True)
+    st.dataframe(valid, use_container_width=True, hide_index=True)
+    if not invalid.empty:
+        with st.expander("Configurations ignorées (coûts manquants)"):
+            st.dataframe(invalid, use_container_width=True, hide_index=True)
 
 
 def _seasonality_inputs(key_prefix: str, seasonality_state: dict) -> Seasonality:

@@ -28,16 +28,17 @@ def _default_materials() -> list[dict]:
             "review_period": 1,
             "ss_months": 1.0,
             "source": "local",
-            # LT local observé: 2–3 jours (approx. en mois: jours / 30)
-            "lt_min_local": 2.0 / 30.0,
-            "lt_mode_local": 2.5 / 30.0,
-            "lt_max_local": 3.0 / 30.0,
-            # LT import: à renseigner (par défaut = local)
+            # LT local : 1 jour
+            "lt_min_local": 1.0 / 30.0,
+            "lt_mode_local": 1.0 / 30.0,
+            "lt_max_local": 1.0 / 30.0,
+            # LT import : 2–3 jours
             "lt_min_import": 2.0 / 30.0,
             "lt_mode_import": 2.5 / 30.0,
             "lt_max_import": 3.0 / 30.0,
-            "cost_local": 0.0,
-            "cost_import": 0.0,
+            # Coûts par conteneur 28t -> MAD/t
+            "cost_local": 100000.0 / 28.0,
+            "cost_import": 90000.0 / 28.0,
         },
         {
             "name": "Mica",
@@ -45,15 +46,16 @@ def _default_materials() -> list[dict]:
             "review_period": 3,
             "ss_months": 2.0,
             "source": "local",
-            # LT local observé: 2–3 jours
-            "lt_min_local": 2.0 / 30.0,
-            "lt_mode_local": 2.5 / 30.0,
-            "lt_max_local": 3.0 / 30.0,
+            # LT local : 1 jour
+            "lt_min_local": 1.0 / 30.0,
+            "lt_mode_local": 1.0 / 30.0,
+            "lt_max_local": 1.0 / 30.0,
+            # LT import : 2–3 jours
             "lt_min_import": 2.0 / 30.0,
             "lt_mode_import": 2.5 / 30.0,
             "lt_max_import": 3.0 / 30.0,
-            "cost_local": 0.0,
-            "cost_import": 0.0,
+            "cost_local": 340000.0 / 28.0,
+            "cost_import": 200000.0 / 28.0,
         },
         {
             "name": "Silice",
@@ -61,15 +63,15 @@ def _default_materials() -> list[dict]:
             "review_period": 3,
             "ss_months": 3.0,
             "source": "import",
-            # Silice (fumed silica): à paramétrer (valeurs par défaut indicatives)
-            "lt_min_local": 1.0,
-            "lt_mode_local": 2.0,
-            "lt_max_local": 4.0,
-            "lt_min_import": 1.0,
-            "lt_mode_import": 2.0,
-            "lt_max_import": 4.0,
+            # Fumed silica : local = 1 jour (coût à préciser), import = 9–10 jours
+            "lt_min_local": 1.0 / 30.0,
+            "lt_mode_local": 1.0 / 30.0,
+            "lt_max_local": 1.0 / 30.0,
+            "lt_min_import": 9.0 / 30.0,
+            "lt_mode_import": 9.5 / 30.0,
+            "lt_max_import": 10.0 / 30.0,
             "cost_local": 0.0,
-            "cost_import": 0.0,
+            "cost_import": 160000.0 / 28.0,
         },
         {
             "name": "Huile",
@@ -77,15 +79,15 @@ def _default_materials() -> list[dict]:
             "review_period": 3,
             "ss_months": 2.0,
             "source": "import",
-            # LT local observé: 30–40 jours (approx. en mois: jours / 30)
-            "lt_min_local": 30.0 / 30.0,
-            "lt_mode_local": 35.0 / 30.0,
-            "lt_max_local": 40.0 / 30.0,
+            # Huile silicone : local = 1 jour, import = 30–40 jours
+            "lt_min_local": 1.0 / 30.0,
+            "lt_mode_local": 1.0 / 30.0,
+            "lt_max_local": 1.0 / 30.0,
             "lt_min_import": 30.0 / 30.0,
             "lt_mode_import": 35.0 / 30.0,
             "lt_max_import": 40.0 / 30.0,
-            "cost_local": 0.0,
-            "cost_import": 0.0,
+            "cost_local": 2200000.0 / 28.0,
+            "cost_import": 600000.0 / 28.0,
         },
     ]
 

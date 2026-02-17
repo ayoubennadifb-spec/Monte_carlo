@@ -88,7 +88,11 @@ def sample_triangular_int(rng: np.random.Generator, a: float, c: float, b: float
 
     On convertit donc en décalage entier par plancher : offset = floor(LT_mois).
     """
-    val = float(rng.triangular(a, c, b))
+    # Cas dégénéré (délai déterministe) : min = mode = max
+    if float(a) == float(b):
+        val = float(a)
+    else:
+        val = float(rng.triangular(a, c, b))
     return max(0, int(math.floor(val)))
 
 
