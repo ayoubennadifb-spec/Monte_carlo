@@ -287,6 +287,33 @@ def _compute_sourcing_grid(
     return out
 
 
+def _render_sourcing_grid(grid_df: pd.DataFrame) -> None:
+    if grid_df is None or grid_df.empty:
+        return
+    best = grid_df.iloc[0].to_dict()
+    st.success(
+        "Meilleure configuration (coût total moyen minimal) : "
+        f"`{best['configuration']}` | mean={best['mean_total']:.0f} MAD"
+    )
+    fig_cost = px.bar(
+        grid_df,
+        x="configuration",
+        y=["mean_purchase", "mean_rupture"],
+        barmode="stack",
+        hover_data=["p05_total", "p50_total", "p95_total", "p_any_stockout_any_mat"],
+    )
+    fig_cost.update_layout(
+        height=320,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis_title="Configuration",
+        yaxis_title="Coût moyen (MAD) — achat + rupture",
+        legend_title_text="Composante",
+    )
+    fig_cost.update_xaxes(tickangle=35, automargin=True)
+    st.plotly_chart(fig_cost, use_container_width=True)
+    st.dataframe(grid_df, use_container_width=True, hide_index=True)
+
+
 def _seasonality_inputs(key_prefix: str, seasonality_state: dict) -> Seasonality:
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -605,28 +632,7 @@ def _render_supply_chain() -> None:
 
         grid_df = st.session_state.get("supply_sourcing_grid_df")
         if isinstance(grid_df, pd.DataFrame) and not grid_df.empty:
-            best = grid_df.iloc[0].to_dict()
-            st.success(
-                "Meilleure configuration (coût total moyen minimal) : "
-                f"`{best['configuration']}` | mean={best['mean_total']:.0f} MAD"
-            )
-            fig_cost = px.bar(
-                grid_df,
-                x="configuration",
-                y=["mean_purchase", "mean_rupture"],
-                barmode="stack",
-                hover_data=["p05_total", "p50_total", "p95_total", "p_any_stockout_any_mat"],
-            )
-            fig_cost.update_layout(
-                height=320,
-                margin=dict(l=10, r=10, t=30, b=10),
-                xaxis_title="Configuration",
-                yaxis_title="Coût moyen (MAD) — achat + rupture",
-                legend_title_text="Composante",
-            )
-            fig_cost.update_xaxes(tickangle=35, automargin=True)
-            st.plotly_chart(fig_cost, use_container_width=True)
-            st.dataframe(grid_df, use_container_width=True, hide_index=True)
+            st.success("Évaluation terminée. Va dans l’onglet **Résultats** pour voir la décision et les graphiques.")
 
         if st.button("Run simulation", type="primary", disabled=not can_run, key="supply_run"):
             cfg = SimulationConfig(**st.session_state["supply_cfg"])
@@ -657,10 +663,21 @@ def _render_supply_chain() -> None:
         st.subheader("Supply Chain — Résultats")
         results = st.session_state.get("supply_results")
         kpi_df = st.session_state.get("supply_kpi_df")
+        grid_df = st.session_state.get("supply_sourcing_grid_df")
+
+        if isinstance(grid_df, pd.DataFrame) and not grid_df.empty:
+            with st.expander("Décision Local vs Import (coût total)", expanded=True):
+                _render_sourcing_grid(grid_df)
+        else:
+            st.info(
+                "Décision Local vs Import : va dans l’onglet Paramètres et clique “Évaluer les 16 configurations”."
+            )
 
         if results is None or kpi_df is None:
-            st.info("Lance une simulation dans l’onglet Paramètres.")
+            st.info("Simulation rupture : lance une simulation dans l’onglet Paramètres pour voir les courbes/KPI.")
+            return
         else:
+
             meta = st.session_state.get("supply_last_run_meta", {})
             elapsed = meta.get("elapsed_s", None)
             cfg = meta.get("cfg", {})
